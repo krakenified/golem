@@ -1,7 +1,6 @@
 import atexit
 import logging
 import os
-import random
 import re
 import subprocess
 import sys
@@ -27,25 +26,9 @@ from golem.utils import tee_target
 
 log = logging.getLogger('golem.ethereum')
 
-
-NODE_LIST_URL = 'https://rinkeby.golem.network'
-FALLBACK_NODE_LIST = [
-    'http://188.165.227.180:55555',
-    'http://94.23.17.170:55555',
-    'http://94.23.57.58:55555',
-]
-
-
-def get_public_nodes():
-    """Returns public geth RPC addresses"""
-    try:
-        return requests.get(NODE_LIST_URL).json()
-    except Exception as exc:
-        log.error("Error downloading node list: %s", exc)
-
-    nodes = FALLBACK_NODE_LIST[:]
-    random.shuffle(nodes)
-    return nodes
+PUBLIC_GETH_PROXY_NODE = 'https://rinkeby.golem.network'
+PUBLIC_GETH_CONNECTION_TIMEOUT = 10
+PUBLIC_GETH_MAX_RETRIES = 3
 
 
 def tETH_faucet_donate(addr):
@@ -89,7 +72,6 @@ class NodeProcess(object):
 
     MIN_GETH_VERSION = StrictVersion('1.7.2')
     MAX_GETH_VERSION = StrictVersion('1.7.999')
-    CONNECTION_TIMEOUT = 10
     CHAIN = 'rinkeby'
 
     SUBPROCESS_PIPES = dict(
@@ -106,7 +88,7 @@ class NodeProcess(object):
         self.datadir = datadir
         self.start_node = start_node
         self.web3 = None  # web3 client interface
-        self.public_nodes = get_public_nodes()
+        self.remote_retries = 0
 
         self.__prog = None  # geth location
         self.__ps = None  # child process
@@ -123,12 +105,13 @@ class NodeProcess(object):
             provider = self._create_local_ipc_provider(self.CHAIN, port)
         else:
             provider = self._create_remote_rpc_provider()
+            self.remote_retries = 0
 
         self.web3 = Web3(provider)
         atexit.register(lambda: self.stop())
 
         started = time.time()
-        deadline = started + self.CONNECTION_TIMEOUT
+        deadline = started + PUBLIC_GETH_CONNECTION_TIMEOUT
 
         while not self.is_connected():
             if time.time() > deadline:
@@ -194,7 +177,8 @@ class NodeProcess(object):
 
     def _start_timed_out(self, provider, port):
         if not self.start_node:
-            self.start_node = not self.public_nodes
+            self.remote_retries += 1
+            self.start_node = self.remote_retries >= PUBLIC_GETH_MAX_RETRIES
             return self.start(port)
         raise OSError("Cannot connect to geth: {}".format(provider))
 
@@ -258,7 +242,7 @@ class NodeProcess(object):
         return IPCProvider(ipc_path)
 
     def _create_remote_rpc_provider(self):
-        node = self.public_nodes.pop()
+        node = PUBLIC_GETH_PROXY_NODE
         log.info('GETH: connecting to remote RPC interface at %s', node)
         return HTTPProvider(node)
 
